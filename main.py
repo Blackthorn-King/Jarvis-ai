@@ -11,9 +11,21 @@ sys.stdout.reconfigure(line_buffering=True)
 
 # --- Find Ollama executable ---
 def find_ollama():
+    # Try which first
     result = subprocess.run(["which", "ollama"], capture_output=True, text=True)
-    if result.returncode == 0:
+    if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
+    # Search Nix store directly
+    nix_result = subprocess.run(
+        "ls /nix/store/*ollama*/bin/ollama 2>/dev/null | sort -V | tail -1",
+        shell=True, capture_output=True, text=True
+    )
+    if nix_result.stdout.strip():
+        return nix_result.stdout.strip()
+    # Common fallback paths
+    for path in ["/usr/local/bin/ollama", "/usr/bin/ollama"]:
+        if os.path.exists(path):
+            return path
     return None
 
 ollama_executable_path = find_ollama()
