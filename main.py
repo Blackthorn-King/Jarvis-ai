@@ -9,18 +9,20 @@ import argparse
 
 sys.stdout.reconfigure(line_buffering=True)
 
-# --- Install Ollama if not present ---
-print("\n--- Checking Ollama installation ---")
-ollama_executable_path = "/usr/local/bin/ollama"
+# --- Find Ollama executable ---
+def find_ollama():
+    result = subprocess.run(["which", "ollama"], capture_output=True, text=True)
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return None
 
-if not os.path.exists(ollama_executable_path):
-    print("Ollama not found. Installing...")
-    subprocess.run(
-        "curl -fsSL https://ollama.com/install.sh | sh",
-        shell=True, check=False
-    )
+ollama_executable_path = find_ollama()
+print("\n--- Checking Ollama installation ---")
+if ollama_executable_path:
+    print(f"Ollama found at: {ollama_executable_path}")
 else:
-    print("Ollama already installed.")
+    print("Ollama not found. Please install it via the package manager.")
+    sys.exit(1)
 
 # --- Imports that require installed packages ---
 import ollama
