@@ -7,6 +7,7 @@ import argparse
 import subprocess
 import webbrowser
 import time
+import threading
 
 # --- Optional: pyautogui for mouse/keyboard control ---
 try:
@@ -15,6 +16,27 @@ try:
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
+
+# --- Optional: speech recognition for voice input ---
+try:
+    import speech_recognition as sr
+    VOICE_INPUT_AVAILABLE = True
+except ImportError:
+    VOICE_INPUT_AVAILABLE = False
+
+# --- Optional: pyttsx3 for voice output (JARVIS speaks back) ---
+try:
+    import pyttsx3
+    tts_engine = pyttsx3.init()
+    tts_engine.setProperty("rate", 175)
+    voices = tts_engine.getProperty("voices")
+    for v in voices:
+        if "male" in v.name.lower() or "david" in v.name.lower() or "mark" in v.name.lower():
+            tts_engine.setProperty("voice", v.id)
+            break
+    VOICE_OUTPUT_AVAILABLE = True
+except ImportError:
+    VOICE_OUTPUT_AVAILABLE = False
 
 URL_SAVE_FILE = os.path.join(os.path.dirname(__file__), ".jarvis_url")
 
@@ -27,6 +49,35 @@ def load_saved_url():
 def save_url(url):
     with open(URL_SAVE_FILE, "w") as f:
         f.write(url)
+
+def speak(text, voice_mode=False):
+    print(f"JARVIS: {text}\n")
+    if voice_mode and VOICE_OUTPUT_AVAILABLE:
+        tts_engine.say(text)
+        tts_engine.runAndWait()
+
+def listen_for_voice():
+    recognizer = sr.Recognizer()
+    recognizer.energy_threshold = 3000
+    recognizer.dynamic_energy_threshold = True
+    with sr.Microphone() as source:
+        print("JARVIS: Listening... (speak now)", end="\r")
+        recognizer.adjust_for_ambient_noise(source, duration=0.5)
+        try:
+            audio = recognizer.listen(source, timeout=8, phrase_time_limit=15)
+            print("JARVIS: Processing...          ", end="\r")
+            text = recognizer.recognize_google(audio)
+            print(f"You (voice): {text}")
+            return text
+        except sr.WaitTimeoutError:
+            print("JARVIS: No speech detected.    ")
+            return None
+        except sr.UnknownValueError:
+            print("JARVIS: Could not understand.  ")
+            return None
+        except sr.RequestError as e:
+            print(f"JARVIS: Voice service error: {e}")
+            return None
 
 def ask_jarvis(url, query):
     payload = json.dumps({"query": query}).encode()
@@ -41,30 +92,27 @@ def ask_jarvis(url, query):
             result = json.loads(r.read())
             return result.get("answer", "No answer returned.")
     except urllib.error.URLError as e:
-        return f"[Connection Error] Could not reach JARVIS: {e.reason}"
+        return f"Connection error: Could not reach JARVIS: {e.reason}"
     except Exception as e:
-        return f"[Error] {e}"
+        return f"Error: {e}"
 
 # --- Computer Control Commands ---
 def handle_computer_command(cmd):
     cmd_lower = cmd.lower().strip()
 
-    # OPEN APP
     if cmd_lower.startswith("open "):
         app = cmd[5:].strip()
         try:
             subprocess.Popen(app, shell=True)
-            return f"Opening {app}..."
+            return f"Opening {app}."
         except Exception as e:
             return f"Could not open {app}: {e}"
 
-    # SEARCH ONLINE
     if cmd_lower.startswith("search "):
         query = cmd[7:].strip()
         webbrowser.open(f"https://www.google.com/search?q={query.replace(' ', '+')}")
         return f"Searching Google for: {query}"
 
-    # OPEN WEBSITE
     if cmd_lower.startswith("go to ") or cmd_lower.startswith("visit "):
         site = cmd.split(" ", 2)[-1].strip()
         if not site.startswith("http"):
@@ -72,7 +120,6 @@ def handle_computer_command(cmd):
         webbrowser.open(site)
         return f"Opening {site} in your browser."
 
-    # SCREENSHOT
     if "screenshot" in cmd_lower:
         if not GUI_AVAILABLE:
             return "pyautogui not installed. Run: pip install pyautogui"
@@ -80,7 +127,6 @@ def handle_computer_command(cmd):
         pyautogui.screenshot(filename)
         return f"Screenshot saved as {filename}"
 
-    # TYPE TEXT
     if cmd_lower.startswith("type "):
         if not GUI_AVAILABLE:
             return "pyautogui not installed. Run: pip install pyautogui"
@@ -89,7 +135,6 @@ def handle_computer_command(cmd):
         pyautogui.typewrite(text, interval=0.05)
         return f"Typed: {text}"
 
-    # CLICK
     if cmd_lower.startswith("click "):
         if not GUI_AVAILABLE:
             return "pyautogui not installed. Run: pip install pyautogui"
@@ -104,7 +149,6 @@ def handle_computer_command(cmd):
         pyautogui.click()
         return "Clicked at current mouse position."
 
-    # MOVE MOUSE
     if cmd_lower.startswith("move mouse "):
         if not GUI_AVAILABLE:
             return "pyautogui not installed. Run: pip install pyautogui"
@@ -117,7 +161,6 @@ def handle_computer_command(cmd):
             except ValueError:
                 return "Usage: move mouse [x] [y]"
 
-    # SCROLL
     if cmd_lower.startswith("scroll up"):
         if not GUI_AVAILABLE:
             return "pyautogui not installed. Run: pip install pyautogui"
@@ -130,7 +173,6 @@ def handle_computer_command(cmd):
         pyautogui.scroll(-5)
         return "Scrolled down."
 
-    # VOLUME (Windows)
     if "volume up" in cmd_lower:
         subprocess.run(["powershell", "-c",
             "(New-Object -comObject WScript.Shell).SendKeys([char]175)"], capture_output=True)
@@ -146,15 +188,13 @@ def handle_computer_command(cmd):
             "(New-Object -comObject WScript.Shell).SendKeys([char]173)"], capture_output=True)
         return "Toggled mute."
 
-    # LOCK SCREEN
     if "lock" in cmd_lower and "screen" in cmd_lower:
         subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"])
         return "Screen locked."
 
-    # SHUTDOWN / RESTART
     if cmd_lower == "shutdown":
         subprocess.run(["shutdown", "/s", "/t", "30"])
-        return "Shutting down in 30 seconds. Type 'cancel shutdown' to stop."
+        return "Shutting down in 30 seconds. Say cancel shutdown to stop."
 
     if cmd_lower == "cancel shutdown":
         subprocess.run(["shutdown", "/a"])
@@ -162,36 +202,23 @@ def handle_computer_command(cmd):
 
     if cmd_lower == "restart":
         subprocess.run(["shutdown", "/r", "/t", "30"])
-        return "Restarting in 30 seconds. Type 'cancel shutdown' to stop."
+        return "Restarting in 30 seconds. Say cancel shutdown to stop."
 
-    # LIST COMMANDS
     if cmd_lower in ["help", "commands", "what can you do"]:
-        return """
-Computer control commands:
-  open [app]          - Open any app (e.g. open notepad)
-  search [query]      - Google search
-  go to [website]     - Open a website
-  screenshot          - Take a screenshot
-  type [text]         - Type text (needs pyautogui)
-  click [x] [y]       - Click at position (needs pyautogui)
-  move mouse [x] [y]  - Move mouse (needs pyautogui)
-  scroll up/down      - Scroll (needs pyautogui)
-  volume up/down      - Adjust volume
-  mute                - Toggle mute
-  lock screen         - Lock your PC
-  shutdown/restart    - Shutdown or restart PC
+        return (
+            "Computer commands: open app, search query, go to website, "
+            "screenshot, type text, click, move mouse, scroll up or down, "
+            "volume up or down, mute, lock screen, shutdown, restart."
+        )
 
-For mouse/keyboard commands, install pyautogui:
-  pip install pyautogui
-"""
-
-    return None  # Not a computer command — pass to JARVIS
+    return None
 
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description="JARVIS VS Code Client")
 parser.add_argument("--save-url", metavar="URL", help="Save a new ngrok URL and connect")
 parser.add_argument("--reset-url", action="store_true", help="Forget the saved URL and enter a new one")
 parser.add_argument("--offline", action="store_true", help="Computer control only, no JARVIS AI connection")
+parser.add_argument("--voice", action="store_true", help="Enable voice mode (speak to JARVIS)")
 args = parser.parse_args()
 
 if args.reset_url and os.path.exists(URL_SAVE_FILE):
@@ -214,8 +241,23 @@ if not args.offline:
             save_url(jarvis_url)
             print(f"URL saved for next time.\n")
 
+voice_mode = args.voice
+if voice_mode and not VOICE_INPUT_AVAILABLE:
+    print("Voice input not available. Install with:")
+    print("  pip install SpeechRecognition pyaudio pyttsx3\n")
+    print("Falling back to text mode.\n")
+    voice_mode = False
+
 print("="*50)
 print("  JARVIS - VS Code Client")
+if voice_mode:
+    print("  Voice mode ON - press Enter to speak")
+    if VOICE_OUTPUT_AVAILABLE:
+        print("  JARVIS will speak responses aloud")
+else:
+    print("  Text mode - type your message")
+    if not voice_mode:
+        print("  Tip: run with --voice to enable voice mode")
 if not GUI_AVAILABLE:
     print("  Tip: pip install pyautogui for mouse/keyboard control")
 print("  Type 'commands' to see all computer controls")
@@ -224,7 +266,13 @@ print("="*50 + "\n")
 
 while True:
     try:
-        user_input = input("You: ").strip()
+        if voice_mode:
+            input("[ Press Enter to speak ]")
+            user_input = listen_for_voice()
+            if not user_input:
+                continue
+        else:
+            user_input = input("You: ").strip()
     except (EOFError, KeyboardInterrupt):
         print("\nJARVIS: Goodbye!")
         break
@@ -233,19 +281,17 @@ while True:
         continue
 
     if user_input.lower() in ["exit", "quit"]:
-        print("JARVIS: Goodbye!")
+        speak("Goodbye!", voice_mode)
         break
 
-    # Try computer command first
     result = handle_computer_command(user_input)
     if result:
-        print(f"JARVIS: {result}\n")
+        speak(result, voice_mode)
         continue
 
-    # Otherwise send to JARVIS AI
     if jarvis_url:
         print("JARVIS: Thinking...", end="\r")
         answer = ask_jarvis(jarvis_url, user_input)
-        print(f"JARVIS: {answer}\n")
+        speak(answer, voice_mode)
     else:
-        print("JARVIS: No AI connection. Run without --offline to connect.\n")
+        speak("No AI connection. Run without --offline to connect.", voice_mode)
