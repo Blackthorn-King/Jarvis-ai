@@ -18,9 +18,11 @@ try:
 except ImportError:
     GUI_AVAILABLE = False
 
-# --- Optional: speech recognition ---
+# --- Optional: speech recognition + sounddevice (no C++ build tools needed) ---
 try:
     import speech_recognition as sr
+    import sounddevice as sd
+    import numpy as np
     VOICE_INPUT_AVAILABLE = True
 except ImportError:
     VOICE_INPUT_AVAILABLE = False
@@ -261,17 +263,27 @@ class JarvisUltraHUD:
 
     def listen_loop(self):
         recognizer = sr.Recognizer()
-        recognizer.energy_threshold = 3000
-        recognizer.dynamic_energy_threshold = True
+        samplerate = 16000
+        duration = 5  # seconds per listening chunk
+
         while self.voice_mode:
             try:
-                with sr.Microphone() as source:
-                    recognizer.adjust_for_ambient_noise(source, duration=0.3)
-                    audio = recognizer.listen(source, timeout=6, phrase_time_limit=15)
-                text = recognizer.recognize_google(audio)
-                self.root.after(0, self.process_voice_input, text)
-            except sr.WaitTimeoutError:
-                continue
+                # Record audio using sounddevice (no pyaudio needed)
+                recording = sd.rec(
+                    int(duration * samplerate),
+                    samplerate=samplerate,
+                    channels=1,
+                    dtype='int16'
+                )
+                sd.wait()
+
+                # Convert numpy array to bytes for SpeechRecognition
+                audio_bytes = recording.tobytes()
+                audio_data = sr.AudioData(audio_bytes, samplerate, 2)
+
+                text = recognizer.recognize_google(audio_data)
+                if text.strip():
+                    self.root.after(0, self.process_voice_input, text)
             except sr.UnknownValueError:
                 continue
             except Exception:
