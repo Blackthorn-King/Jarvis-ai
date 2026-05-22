@@ -147,7 +147,7 @@ def ask_ai_raw(user_content):
     ]
     try:
         response = ollama.chat(
-            model="phi",
+            model="mistral",
             messages=messages,
             options={"temperature": 0.3}
         )
@@ -206,7 +206,7 @@ def run_code(code):
         return str(e)
 
 
-# --- Start Ollama Server and Pull 'phi' Model ---
+# --- Start Ollama Server and Pull 'mistral' Model ---
 print("\n--- Starting Ollama Server and Pulling Model ---")
 log_file_path = "ollama_server_output.log"
 
@@ -239,17 +239,17 @@ else:
         print(f"Ollama server is NOT reachable. Error: {e}")
 
     if server_up:
-        print("Pulling the 'phi' model (this may take a few minutes)...")
+        print("Pulling the 'mistral' model (this may take a few minutes)...")
         pull_result = subprocess.run(
-            [ollama_executable_path, "pull", "phi"],
+            [ollama_executable_path, "pull", "mistral"],
             capture_output=True, text=True, check=False
         )
         print(pull_result.stdout)
         if pull_result.stderr:
             print(pull_result.stderr)
-        print("'phi' model pull complete.")
+        print("'mistral' model pull complete.")
     else:
-        print("Skipping 'phi' model pull — Ollama server not running.")
+        print("Skipping 'mistral' model pull — Ollama server not running.")
 
 print("Ollama setup complete.")
 
