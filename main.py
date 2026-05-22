@@ -278,15 +278,44 @@ app = Flask(__name__)
 def home():
     return "JARVIS Flask server is running! Send POST requests to /ask."
 
+def parse_action(query):
+    """Detect computer action commands and return structured action dict."""
+    q = query.lower().strip()
+    if q.startswith("open "):
+        return {"type": "open", "data": query[5:].strip()}
+    if q.startswith("search "):
+        return {"type": "search", "data": query[7:].strip()}
+    if q.startswith("go to ") or q.startswith("visit "):
+        return {"type": "open", "data": query.split(" ", 2)[-1].strip()}
+    if q.startswith("type "):
+        return {"type": "type", "data": query[5:].strip()}
+    if q.startswith("click ") and "," in query:
+        return {"type": "click", "data": query[6:].strip()}
+    return None
+
 @app.route('/ask', methods=['POST'])
 def ask_jarvis():
     data = request.json
     query = data.get('query')
+    image_b64 = data.get('image')  # optional screen capture from HUD
+
     if not query:
         return jsonify({'error': 'No query provided'}), 400
     try:
-        answer = search_web(query)
-        return jsonify({'answer': answer})
+        # Check for direct action command first
+        action = parse_action(query)
+
+        # Build context-aware prompt if screen image provided
+        if image_b64:
+            full_query = f"[The user has shared their screen. Describe what you see and answer:] {query}"
+        else:
+            full_query = query
+
+        answer = search_web(full_query)
+        response = {'answer': answer}
+        if action:
+            response['action'] = action
+        return jsonify(response)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
