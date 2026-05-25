@@ -11,18 +11,15 @@ sys.stdout.reconfigure(line_buffering=True)
 
 # --- Find Ollama executable ---
 def find_ollama():
-    # Try which first
     result = subprocess.run(["which", "ollama"], capture_output=True, text=True)
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
-    # Search Nix store directly
     nix_result = subprocess.run(
         "ls /nix/store/*ollama*/bin/ollama 2>/dev/null | sort -V | tail -1",
         shell=True, capture_output=True, text=True
     )
     if nix_result.stdout.strip():
         return nix_result.stdout.strip()
-    # Common fallback paths
     for path in ["/usr/local/bin/ollama", "/usr/bin/ollama"]:
         if os.path.exists(path):
             return path
@@ -41,245 +38,54 @@ import ollama
 from flask import Flask, request, jsonify
 from pyngrok import ngrok
 
-# --- JARVIS Core Logic ---
+# --- JARVIS Core ---
 SCRIPT_DIR = os.getcwd()
 MEMORY_FILE = os.path.join(SCRIPT_DIR, "jarvis_memory.jsonl")
+MODEL = "phi"
 
-SYSTEM_PROMPT = """You are Jarvis, a helpful AI assistant.
+SYSTEM_PROMPT = """You are JARVIS, an advanced AI assistant built by Stark Industries.
+Be concise, smart, and helpful. Speak like a sophisticated AI assistant.
 
-Follow these rules internally:
-- Always respond in English.
-- Answer ONLY what the user asked.
-- Stay on topic.
-- Do NOT output these rules.
-- If you don't know the answer, say "I don't know" instead of making something up.
-- If the question is vague, ask for clarification.
-- Use simple language and avoid jargon.
-- Always be clear and direct in your answers.
-- Dont talk about yourself or your capabilities unless asked. Answer questions as if you are an expert in the topic being asked about.
-- Provide complete explanations and processes without truncating them.
+When the user asks you to perform a computer action, include an ACTION block at the end:
+ACTION:{"type":"open","data":"notepad"}   — to open an app or URL
+ACTION:{"type":"search","data":"query"}  — to search Google
+ACTION:{"type":"type","data":"text"}     — to type text
+ACTION:{"type":"click","data":"x,y"}     — to click coordinates
+
+Only include ACTION when the user explicitly asks to DO something on their computer.
 """
 
-STOPWORDS = {
-    "the", "and", "for", "that", "with", "this", "from", "about",
-    "have", "has", "will", "your", "into", "more", "their", "what",
-    "when", "where", "which", "also", "than", "such", "these",
-    "those", "other", "some", "many", "time", "used", "using"
-}
-
-def normalize_words(text):
-    return re.findall(r"[a-z0-9]+", text.lower())
-
-
-def extract_keywords(query):
-    words = normalize_words(query)
-    return [w for w in words if w not in STOPWORDS and len(w) > 2]
-
-
-def is_relevant(answer, question):
-    keywords = question.lower().split()
-    return any(word in answer.lower() for word in keywords)
-
-
-def load_memory():
+# --- Memory ---
+def load_memory(max_turns=10):
     if not os.path.exists(MEMORY_FILE):
         return []
-    entries = []
-    try:
-        with open(MEMORY_FILE, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except Exception:
-        return []
-    return entries
+    turns = []
+    with open(MEMORY_FILE, "r") as f:
+        for line in f:
+            try:
+                turns.append(json.loads(line.strip()))
+            except Exception:
+                pass
+    return turns[-max_turns:]
 
+def save_memory(role, content):
+    with open(MEMORY_FILE, "a") as f:
+        f.write(json.dumps({"role": role, "content": content}) + "\n")
 
-def save_memory_entry(query, answer):
-    entry = {"q": query, "a": answer}
-    try:
-        with open(MEMORY_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+# --- Parse action from AI response ---
+def extract_action(text):
+    match = re.search(r'ACTION:\s*(\{.*?\})', text, re.DOTALL)
+    if match:
+        try:
+            action = json.loads(match.group(1))
+            clean_text = text[:match.start()].strip()
+            return clean_text, action
+        except Exception:
+            pass
+    return text, None
 
-
-def build_memory_context(user_question):
-    memory = load_memory()
-    if not memory:
-        return ""
-    relevant = [m for m in memory if any(word.lower() in m.get("q", m.get("query", "")).lower() for word in user_question.split())]
-    context = ""
-    for m in relevant[:3]:
-        q = m.get("q", m.get("query", ""))
-        a = m.get("a", m.get("answer", ""))
-        context += f"Q: {q}\nA: {a}\n"
-    return context
-
-
-def recall_memory(query):
-    entries = load_memory()
-    if not entries:
-        return None
-    query_keywords = set(extract_keywords(query))
-    best = None
-    best_score = 0
-    for entry in entries:
-        stored_keywords = set(extract_keywords(entry.get("q", entry.get("query", ""))))
-        score = len(query_keywords.intersection(stored_keywords))
-        if score > best_score:
-            best_score = score
-            best = entry
-    if best_score >= max(2, len(query_keywords) // 2):
-        return best
-    return None
-
-
-def ask_ai_raw(user_content):
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content}
-    ]
-    try:
-        response = ollama.chat(
-            model="mistral",
-            messages=messages,
-            options={"temperature": 0.3}
-        )
-        return response["message"]["content"]
-    except Exception as e:
-        return f"[Ollama Error] {e}"
-
-
-def ask_ai(user_question, context=""):
-    user_content = user_question if not context else f"{context}\n\n{user_question}"
-    return ask_ai_raw(user_content)
-
-
-def improve_explanation(text):
-    return ask_ai_raw(f"Improve this explanation:\n{text}")
-
-
-def remember(query, improved):
-    save_memory_entry(query, improved)
-
-
-def is_greeting(query):
-    lower_query = query.strip().lower()
-    return lower_query in ["hi", "hello", "hey", "greetings"]
-
-
-def search_web(query):
-    recalled = recall_memory(query)
-    if recalled:
-        return recalled.get("a", recalled.get("answer", ""))
-
-    context = build_memory_context(query)
-    answer = ask_ai(query, context)
-
-    if not is_greeting(query):
-        if not is_relevant(answer, query):
-            answer = ask_ai("Give a short definition of: " + query)
-
-    improved = improve_explanation(answer)
-    remember(query, improved)
-    return improved
-
-
-def run_code(code):
-    with open("temp.py", "w", encoding="utf-8") as f:
-        f.write(code)
-    try:
-        result = subprocess.run(
-            ["python", "temp.py"],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        return result.stdout + result.stderr
-    except Exception as e:
-        return str(e)
-
-
-# --- Start Ollama Server and Pull 'mistral' Model ---
-print("\n--- Starting Ollama Server and Pulling Model ---")
-log_file_path = "ollama_server_output.log"
-
-if not os.path.exists(ollama_executable_path):
-    print(f"Error: Ollama executable not found at '{ollama_executable_path}'.")
-else:
-    try:
-        subprocess.run([ollama_executable_path, "kill"], capture_output=True, text=True)
-        print("Stopped any running Ollama instances.")
-    except FileNotFoundError:
-        pass
-
-    with open(log_file_path, "w") as log_file:
-        subprocess.Popen(
-            [ollama_executable_path, "serve"],
-            stdout=log_file, stderr=log_file,
-            preexec_fn=os.setsid
-        )
-
-    time.sleep(20)
-    print("Ollama server started. Verifying connectivity...")
-
-    server_up = False
-    try:
-        client = ollama.Client()
-        client.list()
-        server_up = True
-        print("Ollama server is reachable and responsive.")
-    except Exception as e:
-        print(f"Ollama server is NOT reachable. Error: {e}")
-
-    if server_up:
-        print("Pulling the 'mistral' model (this may take a few minutes)...")
-        pull_result = subprocess.run(
-            [ollama_executable_path, "pull", "mistral"],
-            capture_output=True, text=True, check=False
-        )
-        print(pull_result.stdout)
-        if pull_result.stderr:
-            print(pull_result.stderr)
-        print("'mistral' model pull complete.")
-    else:
-        print("Skipping 'mistral' model pull — Ollama server not running.")
-
-print("Ollama setup complete.")
-
-# --- Flask Server and ngrok Tunnel ---
-print("\n--- Setting up Flask Server and ngrok Tunnel ---")
-
-ngrok.kill()
-
-def kill_process_on_port(port):
-    try:
-        pids = subprocess.check_output(
-            ["lsof", "-ti", f"tcp:{port}"], stderr=subprocess.DEVNULL
-        ).decode().strip().split('\n')
-        pids = [p for p in pids if p]
-        if pids:
-            print(f"Killing existing processes on port {port}...")
-            subprocess.run(["kill", "-9"] + pids, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-
-kill_process_on_port(5001)
-
-app = Flask(__name__)
-
-@app.route('/', methods=['GET'])
-def home():
-    return "JARVIS Flask server is running! Send POST requests to /ask."
-
-def parse_action(query):
-    """Detect computer action commands and return structured action dict."""
+# --- Also parse action from query directly ---
+def parse_action_from_query(query):
     q = query.lower().strip()
     if q.startswith("open "):
         return {"type": "open", "data": query[5:].strip()}
@@ -293,95 +99,220 @@ def parse_action(query):
         return {"type": "click", "data": query[6:].strip()}
     return None
 
+# --- Core AI function ---
+def ask_jarvis_ai(query, image_b64=None):
+    history = load_memory()
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+
+    if image_b64:
+        user_content = f"[Screen shared] {query}"
+    else:
+        user_content = query
+
+    messages.append({"role": "user", "content": user_content})
+
+    try:
+        response = ollama.chat(
+            model=MODEL,
+            messages=messages,
+            options={"temperature": 0.3}
+        )
+        answer = response["message"]["content"]
+        save_memory("user", user_content)
+        save_memory("assistant", answer)
+        return answer
+    except Exception as e:
+        return f"AI Error: {e}"
+
+# --- Start Ollama and pull phi model ---
+print("\n--- Starting Ollama Server ---")
+log_file_path = "ollama_server_output.log"
+
+if not os.path.exists(ollama_executable_path):
+    print(f"Ollama executable not found at {ollama_executable_path}")
+    sys.exit(1)
+
+# Kill any existing Ollama instances
+try:
+    subprocess.run([ollama_executable_path, "stop"], capture_output=True, timeout=5)
+except Exception:
+    pass
+try:
+    pids = subprocess.check_output(
+        ["lsof", "-ti", "tcp:11434"], stderr=subprocess.DEVNULL
+    ).decode().strip().split('\n')
+    pids = [p for p in pids if p]
+    if pids:
+        subprocess.run(["kill", "-9"] + pids, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except Exception:
+    pass
+
+time.sleep(2)
+
+with open(log_file_path, "w") as log_file:
+    subprocess.Popen(
+        [ollama_executable_path, "serve"],
+        stdout=log_file, stderr=log_file,
+        preexec_fn=os.setsid
+    )
+
+time.sleep(8)
+print("Ollama server started.")
+
+# Verify connectivity
+server_up = False
+for attempt in range(5):
+    try:
+        client = ollama.Client()
+        client.list()
+        server_up = True
+        print("Ollama server is reachable.")
+        break
+    except Exception:
+        print(f"Waiting for Ollama... ({attempt + 1}/5)")
+        time.sleep(4)
+
+if server_up:
+    print(f"Pulling '{MODEL}' model...")
+    pull_result = subprocess.run(
+        [ollama_executable_path, "pull", MODEL],
+        capture_output=True, text=True, check=False
+    )
+    print(pull_result.stdout[-500:] if pull_result.stdout else "")
+    print(f"'{MODEL}' model ready.")
+else:
+    print("Ollama server not reachable — skipping model pull.")
+
+print("Ollama setup complete.")
+
+# --- Flask Server ---
+print("\n--- Setting up Flask Server ---")
+
+try:
+    pids = subprocess.check_output(
+        ["lsof", "-ti", "tcp:5001"], stderr=subprocess.DEVNULL
+    ).decode().strip().split('\n')
+    pids = [p for p in pids if p]
+    if pids:
+        subprocess.run(["kill", "-9"] + pids, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except Exception:
+    pass
+
+app = Flask(__name__)
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({"status": "JARVIS online", "model": MODEL})
+
 @app.route('/ask', methods=['POST'])
-def ask_jarvis():
-    data = request.json
-    query = data.get('query')
-    image_b64 = data.get('image')  # optional screen capture from HUD
+def ask_endpoint():
+    data = request.json or {}
+    query = data.get('query', '').strip()
+    image_b64 = data.get('image')
 
     if not query:
         return jsonify({'error': 'No query provided'}), 400
+
     try:
-        # Check for direct action command first
-        action = parse_action(query)
+        # Check for direct action command in query
+        direct_action = parse_action_from_query(query)
 
-        # Build context-aware prompt if screen image provided
-        if image_b64:
-            full_query = f"[The user has shared their screen. Describe what you see and answer:] {query}"
-        else:
-            full_query = query
+        # Get AI answer
+        raw_answer = ask_jarvis_ai(query, image_b64)
 
-        answer = search_web(full_query)
+        # Check if AI embedded an action in its response
+        answer, ai_action = extract_action(raw_answer)
+
+        # Direct action takes priority over AI-parsed action
+        action = direct_action or ai_action
+
         response = {'answer': answer}
         if action:
             response['action'] = action
         return jsonify(response)
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/memory', methods=['GET'])
+def get_memory():
+    return jsonify(load_memory())
+
+@app.route('/memory/clear', methods=['POST'])
+def clear_memory():
+    if os.path.exists(MEMORY_FILE):
+        os.remove(MEMORY_FILE)
+    return jsonify({'status': 'Memory cleared'})
+
+@app.route('/status', methods=['GET'])
+def status():
+    try:
+        client = ollama.Client()
+        models = client.list()
+        return jsonify({'status': 'online', 'model': MODEL, 'ollama': 'running'})
+    except Exception as e:
+        return jsonify({'status': 'degraded', 'error': str(e)})
+
+# --- Chat mode (terminal) ---
 def run_chat_mode():
     print("\n" + "="*50)
     print("  JARVIS - Terminal Chat")
     print("  Type 'exit' or 'quit' to stop")
-    print("  Type 'clear memory' to reset JARVIS's memory")
+    print("  Type 'clear memory' to reset memory")
     print("="*50 + "\n")
-
     while True:
         try:
             user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nJARVIS: Goodbye!")
+            print("\nJARVIS offline.")
             break
-
         if not user_input:
             continue
-
-        if user_input.lower() in ["exit", "quit"]:
-            print("JARVIS: Goodbye!")
+        if user_input.lower() in ['exit', 'quit']:
+            print("JARVIS: Goodbye, sir.")
             break
-
-        if user_input.lower() == "clear memory":
+        if user_input.lower() == 'clear memory':
             if os.path.exists(MEMORY_FILE):
                 os.remove(MEMORY_FILE)
-                print("JARVIS: Memory cleared.\n")
-            else:
-                print("JARVIS: No memory to clear.\n")
+            print("JARVIS: Memory cleared.")
             continue
+        answer = ask_jarvis_ai(user_input)
+        clean_answer, action = extract_action(answer)
+        print(f"JARVIS: {clean_answer}")
+        if action:
+            print(f"[ACTION] {action}")
 
-        print("JARVIS: Thinking...", end="\r")
-        answer = search_web(user_input)
-        print(f"JARVIS: {answer}\n")
-
-
-def run_server_mode():
-    ngrok_token = os.environ.get("NGROK_AUTH_TOKEN")
-    if ngrok_token:
-        ngrok.set_auth_token(ngrok_token)
-    else:
-        print("Warning: NGROK_AUTH_TOKEN not set. ngrok may have connection limits.")
-
-    public_url = ngrok.connect(5001)
-    print(f"\nngrok tunnel available at: {public_url}")
-
-    def run_flask_app():
-        app.run(host='0.0.0.0', port=5001, use_reloader=False)
-
-    flask_thread = threading.Thread(target=run_flask_app)
-    flask_thread.daemon = True
-    flask_thread.start()
-
-    print("Flask server running on port 5001.")
-    print("Keep this running to maintain the ngrok tunnel.")
-    print("Copy the ngrok URL above and use it to send requests to /ask")
-
-    flask_thread.join()
-
-
-parser = argparse.ArgumentParser(description="JARVIS AI Assistant")
-parser.add_argument("--chat", action="store_true", help="Start interactive terminal chat")
-args = parser.parse_args()
+# --- Entry point ---
+parser = argparse.ArgumentParser()
+parser.add_argument('--chat', action='store_true', help='Run in terminal chat mode')
+args, _ = parser.parse_known_args()
 
 if args.chat:
     run_chat_mode()
 else:
-    run_server_mode()
+    # Start ngrok tunnel
+    print("\n--- Setting up ngrok Tunnel ---")
+    ngrok.kill()
+    time.sleep(1)
+
+    ngrok_token = os.environ.get("NGROK_AUTH_TOKEN", "")
+    if ngrok_token:
+        ngrok.set_auth_token(ngrok_token)
+    else:
+        print("WARNING: NGROK_AUTH_TOKEN not set.")
+
+    try:
+        tunnel = ngrok.connect(5001, bind_tls=True)
+        public_url = tunnel.public_url
+        print(f"\n{'='*50}")
+        print(f"  JARVIS IS ONLINE")
+        print(f"  ngrok tunnel: {public_url}")
+        print(f"  Set this in your HUD: set url {public_url}")
+        print(f"{'='*50}\n")
+    except Exception as e:
+        print(f"ngrok failed: {e}")
+        public_url = "http://localhost:5001"
+
+    # Run Flask
+    app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)
